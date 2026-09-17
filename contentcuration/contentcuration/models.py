@@ -1006,29 +1006,70 @@ class PermissionCTE(With):
     tree_id_fields = [
         "channel__{}__tree_id".format(tree_name) for tree_name in CHANNEL_TREES
     ]
+    channel_tree_id_fields = [
+        "{}__tree_id".format(tree_name) for tree_name in CHANNEL_TREES
+    ]
 
-    def __init__(self, model, user_id, **kwargs):
-        queryset = model.objects.filter(user_id=user_id).annotate(
-            tree_id=Unnest(
-                ArrayRemove(Array(*self.tree_id_fields), None),
-                output_field=models.IntegerField(),
+    def __init__(self, queryset, **kwargs):
+        super(PermissionCTE, self).__init__(queryset=queryset, **kwargs)
+
+    @classmethod
+    def _personal_channels(cls, model, user_id):
+        return (
+            model.objects.filter(user_id=user_id)
+            .annotate(
+                tree_id=Unnest(
+                    ArrayRemove(Array(*cls.tree_id_fields), None),
+                    output_field=models.IntegerField(),
+                )
             )
+            .values("user_id", "channel_id", "tree_id")
         )
-        super(PermissionCTE, self).__init__(
-            queryset=queryset.values("user_id", "channel_id", "tree_id"), **kwargs
+
+    @classmethod
+    def _organization_channels(cls, user_id, roles):
+        # Organizations grant channel permissions to their members, on top of
+        # whatever personal editor/viewer access a user already has.
+        return (
+            Channel.objects.filter(
+                organization__user_roles__user_id=user_id,
+                organization__user_roles__role__in=roles,
+                organization__user_roles__status=ORGANIZATION_ROLE_STATUS_ACTIVE,
+            )
+            .annotate(
+                user_id=Value(user_id, output_field=models.IntegerField()),
+                channel_id=F("id"),
+                tree_id=Unnest(
+                    ArrayRemove(Array(*cls.channel_tree_id_fields), None),
+                    output_field=models.IntegerField(),
+                ),
+            )
+            .values("user_id", "channel_id", "tree_id")
         )
 
     @classmethod
     def editable_channels(cls, user_id):
-        return PermissionCTE(
-            User.editable_channels.through, user_id, name="editable_channels_cte"
+        queryset = cls._personal_channels(
+            User.editable_channels.through, user_id
+        ).union(
+            cls._organization_channels(
+                user_id, (ORGANIZATION_ADMIN, ORGANIZATION_EDITOR)
+            ),
+            all=True,
         )
+        return PermissionCTE(queryset, name="editable_channels_cte")
 
     @classmethod
     def view_only_channels(cls, user_id):
-        return PermissionCTE(
-            User.view_only_channels.through, user_id, name="view_only_channels_cte"
+        queryset = cls._personal_channels(
+            User.view_only_channels.through, user_id
+        ).union(
+            cls._organization_channels(
+                user_id, (ORGANIZATION_ADMIN, ORGANIZATION_EDITOR, ORGANIZATION_VIEWER)
+            ),
+            all=True,
         )
+        return PermissionCTE(queryset, name="view_only_channels_cte")
 
     def exists(self, *filters):
         return Exists(self.queryset().filter(*filters).values("user_id"))
@@ -1301,6 +1342,18 @@ class Channel(models.Model):
                 )
             )
 
+            organization_edit = Exists(
+                OrganizationRole.objects.filter(
+                    user_id=user_id,
+                    organization_id=OuterRef("organization_id"),
+                    status=ORGANIZATION_ROLE_STATUS_ACTIVE,
+                    role__in=(
+                        ORGANIZATION_ADMIN,
+                        ORGANIZATION_EDITOR,
+                    ),
+                )
+            )
+
             organization_view = Exists(
                 OrganizationRole.objects.filter(
                     user_id=user_id,
@@ -1316,11 +1369,13 @@ class Channel(models.Model):
         else:
             edit = boolean_val(False)
             view = boolean_val(False)
+            organization_edit = boolean_val(False)
             organization_view = boolean_val(False)
 
         queryset = queryset.annotate(
             edit=edit,
             view=view,
+            organization_edit=organization_edit,
             organization_view=organization_view,
         )
 

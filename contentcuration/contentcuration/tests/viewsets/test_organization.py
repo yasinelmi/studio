@@ -16,6 +16,7 @@ from contentcuration.constants.organization_roles import (
 )
 from contentcuration.constants.organization_roles import ORGANIZATION_VIEWER
 from contentcuration.models import Channel
+from contentcuration.models import ContentNode
 from contentcuration.models import Organization
 from contentcuration.models import OrganizationRole
 from contentcuration.tests import testdata
@@ -701,6 +702,32 @@ class OrganizationChannelPermissionTestCase(OrganizationAPITestCase):
     def test_pending_role_grants_no_channel_access(self):
         self.assertFalse(self._viewable_channel(self.pending_user).exists())
         self.assertFalse(self._editable_channel(self.pending_user).exists())
+
+    def test_org_editor_can_edit_channel_content_without_m2m_share(self):
+        node = self.channel.main_tree
+        self.assertTrue(
+            ContentNode.filter_edit_queryset(
+                ContentNode.objects.filter(pk=node.pk), self.editor_user
+            ).exists()
+        )
+
+    def test_org_viewer_cannot_edit_channel_content(self):
+        node = self.channel.main_tree
+        self.assertFalse(
+            ContentNode.filter_edit_queryset(
+                ContentNode.objects.filter(pk=node.pk), self.viewer_user
+            ).exists()
+        )
+
+    def test_org_editor_channel_api_reports_edit_permission(self):
+        self.authenticate_as(self.editor_user)
+
+        response = self.client.get(
+            reverse("channel-detail", kwargs={"pk": self.channel.id})
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["edit"])
 
 
 class OrganizationPaginationTestCase(OrganizationAPITestCase):

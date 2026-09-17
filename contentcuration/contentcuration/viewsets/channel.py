@@ -7,7 +7,9 @@ from typing import Union
 
 from django.conf import settings
 from django.db import IntegrityError
+from django.db.models import BooleanField
 from django.db.models import Exists
+from django.db.models import ExpressionWrapper
 from django.db.models import FilteredRelation
 from django.db.models import OuterRef
 from django.db.models import Q
@@ -503,8 +505,6 @@ class ChannelViewSet(ValuesViewset):
 
     def get_queryset(self):
         queryset = super(ChannelViewSet, self).get_queryset()
-        user_id = not self.request.user.is_anonymous and self.request.user.id
-        user_queryset = User.objects.filter(id=user_id)
         # Add the last modified node modified value as the channel last modified
         channel_main_tree_nodes = ContentNode.objects.filter(
             tree_id=OuterRef("main_tree__tree_id")
@@ -515,9 +515,19 @@ class ChannelViewSet(ValuesViewset):
             )
         )
 
+        # super().get_queryset() already annotates edit/view (personal grants only)
+        # and organization_edit/organization_view (org role grants); fold the org
+        # grants in here rather than overwriting edit/view with the personal-only checks.
+        queryset = queryset.annotate(
+            edit=ExpressionWrapper(
+                Q(edit=True) | Q(organization_edit=True), output_field=BooleanField()
+            ),
+        )
         return queryset.annotate(
-            edit=Exists(user_queryset.filter(editable_channels=OuterRef("id"))),
-            view=Exists(user_queryset.filter(view_only_channels=OuterRef("id"))),
+            view=ExpressionWrapper(
+                Q(view=True) | Q(edit=True) | Q(organization_view=True),
+                output_field=BooleanField(),
+            ),
         )
 
     def _annotate_draft_token(self, queryset):
